@@ -1,0 +1,78 @@
+DECLARE @StartDate DATE;
+
+-- Calculate the last Saturday
+SET @StartDate = DATEADD(DAY, - (DATEPART(WEEKDAY, GETDATE()) + 1) % 7, GETDATE());
+
+WITH LatestSubscriptions AS (
+    SELECT 
+        s.CompanyId,
+        sp.Product, 
+        s.SubscriptionId,
+        s.StartDate,
+        s.monthlyprice,
+        s.hasicbcsubscription,
+        s.SubscriptionProductBundleId,
+        CASE
+            WHEN s.CancellationEffectiveDate IS NULL THEN s.EndDate
+            WHEN s.EndDate > s.CancellationEffectiveDate THEN s.CancellationEffectiveDate
+            WHEN s.EndDate < s.CancellationEffectiveDate THEN s.EndDate
+            ELSE s.EndDate 
+        END AS EndDate,
+        ROW_NUMBER() OVER (PARTITION BY [s].[CompanyId] ORDER BY [s].[EndDate] DESC) AS N
+    FROM
+        [lienquest].[Subscription] s
+    INNER JOIN 
+        lienquest.SubscriptionProduct sp ON s.SubscriptionProductId = sp.SubscriptionProductId
+    INNER JOIN 
+        lienquest.SubscriptionProductType spt ON s.SubscriptionProductTypeId = spt.SubscriptionProductTypeId
+    WHERE
+        sp.Product IN('VHR', 'VHR Verified','Vehicle Trade-in Widget','VVR') 
+        AND s.StartDate < @StartDate 
+        AND ((s.EndDate > @StartDate AND s.EndDate IS NOT NULL) 
+        OR s.CancellationEffectiveDate > @StartDate)
+),
+Activity AS (
+    SELECT
+        fa.accountnumber AS CompanyId,
+        b.description,
+        b.modifiedon,
+        b.actualend,
+        ROW_NUMBER() OVER ( PARTITION BY fa.accountnumber ORDER BY 
+                CASE WHEN b.actualend IS NULL THEN b.modifiedon ELSE b.actualend END DESC
+        ) AS Ranking
+    FROM
+        bi.crm.FilteredAccount fa
+    LEFT OUTER JOIN 
+        bi.crm.FilteredPhoneCall b ON fa.accountid = b.new_phonecallaccount
+    WHERE
+        b.modifiedon >= N'2023-01-01T00:00:00'
+)
+SELECT 
+    ls.CompanyId,
+    ls.Product,
+    ls.SubscriptionId,
+    ls.StartDate,
+    ls.monthlyprice,
+    ls.hasicbcsubscription,
+    ls.SubscriptionProductBundleId,
+    ls.EndDate,
+    act.description AS LastTouchDescription,
+    CASE 
+        WHEN act.actualend IS NULL THEN act.modifiedon  
+        ELSE act.actualend 
+    END AS LastTouchDate
+FROM 
+    LatestSubscriptions ls
+LEFT JOIN (
+    SELECT 
+        CompanyId, 
+        description, 
+        modifiedon, 
+        actualend
+    FROM 
+        Activity
+    WHERE 
+        Ranking = 1
+) AS act ON ls.CompanyId = act.CompanyId
+WHERE 
+    ls.N = 1;
